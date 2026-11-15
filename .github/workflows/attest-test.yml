@@ -62,3 +62,66 @@ jobs:
         with:
           name: release-${{ matrix.run }}
           path: ${{ runner.temp }}/release/*
+
+  guard-without-read:
+    name: Guard (contents read only)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.x'
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Verify the file to upload matches its attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DIST_FILE=$(find dist/umd -name "*.min.js" | head -1)
+          gh attestation verify "$DIST_FILE" --repo "$GITHUB_REPOSITORY"
+
+  guard-with-read:
+    name: Guard (attestations read)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.x'
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Verify the file to upload matches its attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DIST_FILE=$(find dist/umd -name "*.min.js" | head -1)
+          gh attestation verify "$DIST_FILE" --repo "$GITHUB_REPOSITORY"
+
+  guard-no-attestation:
+    name: Guard must fail on an unattested file
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.x'
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Alter the built file, then verify (expected to fail)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DIST_FILE=$(find dist/umd -name "*.min.js" | head -1)
+          printf '\n// changed' >> "$DIST_FILE"
+          if gh attestation verify "$DIST_FILE" --repo "$GITHUB_REPOSITORY"; then echo "UNEXPECTED: verify passed"; exit 1; else echo "verify failed as expected"; fi
