@@ -1,0 +1,70 @@
+name: Attest test
+
+on:
+  push:
+    branches:
+      - shared-manifest-test
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.run }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [a, b]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build project
+        run: npm run build
+
+      - name: Collect the file customers receive
+        id: collect
+        run: |
+          DIST_FILE=$(find dist/umd -name "*.min.js" | head -1)
+          mkdir -p "$RUNNER_TEMP/release"
+          cp "$DIST_FILE" "$RUNNER_TEMP/release/nrvideo.min.js"
+          echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Integrity manifest (shared action, web with a versioned and a latest alias)
+        uses: ./.github/actions/integrity-manifest
+        with:
+          name: "@newrelic/video-core"
+          version: ${{ steps.collect.outputs.version }}
+          tag: v${{ steps.collect.outputs.version }}
+          commit: ${{ github.sha }}
+          files: |
+            ${{ runner.temp }}/release/nrvideo.min.js:nrvideo.${{ steps.collect.outputs.version }}.min.js,nrvideo.latest.min.js
+          output-dir: ${{ runner.temp }}/integrity
+
+      - name: Add the manifest files to the release folder
+        run: cp "$RUNNER_TEMP"/integrity/integrity-manifest.json "$RUNNER_TEMP"/integrity/SHA256SUMS "$RUNNER_TEMP/release/"
+
+      - name: Attest build provenance (run a only)
+        if: matrix.run == 'a'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/*
+
+      - name: Upload files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.run }}
+          path: ${{ runner.temp }}/release/*
