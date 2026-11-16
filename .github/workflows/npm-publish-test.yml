@@ -1,0 +1,69 @@
+name: Publish Module released test
+
+on:
+  push:
+    branches: [web-released-neg, web-released-pos]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+
+    - name: Setup git
+      run: |
+        git config user.name "${{ github.actor }}"
+        git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+    - name: Set up Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        # Trusted Publishing requires `npm@11.5.1` or later. Compatible
+        # versions of `npm` started shipping with Node.js v24.5.0.
+        # Hardcoded to ensure NPM Trusted Publishing compatibility.
+        node-version: '24.x'
+        cache: 'npm'
+        # This is important. The OIDC exchange requires that the registry
+        # URL matches on both ends.
+        registry-url: 'https://registry.npmjs.org'
+
+    - name: Install dependencies
+      run: npm ci --ignore-scripts
+
+    - name: Build project
+      run: npm run build
+
+    - name: Get Package Version
+      id: package-version
+      run: |
+        PACKAGE_VERSION=$(jq -r '.version' package.json)
+        echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> $GITHUB_ENV
+        echo "package-version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+        echo "release-tag=v$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+        if echo "$PACKAGE_VERSION" | grep -q "beta"; then
+          echo "NPM_TAG=beta" >> $GITHUB_ENV
+        else
+          echo "NPM_TAG=latest" >> $GITHUB_ENV
+        fi
+
+    # A published release is immutable, so a version that is already released cannot be redone.
+    - name: Stop if this version is already released
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: v${{ env.PACKAGE_VERSION }}
+      run: |
+        PUBLISHED=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg t "$TAG_NAME" '.[] | select(.tag_name == $t and (.draft | not)) | .tag_name')
+        if [ -n "$PUBLISHED" ]; then
+          echo "::error::$TAG_NAME is already released and cannot be changed. Bump the version and release again."
+          exit 1
+        fi
+        echo "No published release for $TAG_NAME."
+
+    - name: Reached the end
+      run: echo reached the end
