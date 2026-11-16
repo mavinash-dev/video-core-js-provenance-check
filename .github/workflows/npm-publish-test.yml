@@ -1,0 +1,102 @@
+name: Publish Module resume test
+
+on:
+  push:
+    branches: [web-resume-draft, web-resume-pub]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+
+    - name: Get Package Version
+      id: package-version
+      run: |
+        PACKAGE_VERSION=$(jq -r '.version' package.json)
+        echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> $GITHUB_ENV
+        echo "package-version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+        echo "release-tag=v$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+        if echo "$PACKAGE_VERSION" | grep -q "beta"; then
+          echo "NPM_TAG=beta" >> $GITHUB_ENV
+        else
+          echo "NPM_TAG=latest" >> $GITHUB_ENV
+        fi
+
+    - name: Seed a release for the version
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [ "${{ github.ref_name }}" = "web-resume-pub" ]; then
+          gh release create "v$PACKAGE_VERSION" --title "v$PACKAGE_VERSION" --notes seeded --target "$GITHUB_SHA"
+        else
+          gh release create "v$PACKAGE_VERSION" --draft --title "v$PACKAGE_VERSION" --notes leftover --target "$GITHUB_SHA"
+        fi
+
+    # A published release is immutable, so a version that is already released cannot be redone.
+    # A draft left by an earlier failed run can be, so it is deleted and rebuilt.
+    - name: Stop if this version is already released
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: v${{ env.PACKAGE_VERSION }}
+      run: |
+        EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg t "$TAG_NAME" '.[] | select(.tag_name == $t) | "\(.id) \(.draft)"')
+        if [ -z "$EXISTING" ]; then
+          echo "No release for $TAG_NAME yet."
+          exit 0
+        fi
+        read -r ID DRAFT <<< "$EXISTING"
+        if [ "$DRAFT" != "true" ]; then
+          echo "::error::$TAG_NAME is already released and cannot be changed. Bump the version and release again."
+          exit 1
+        fi
+        echo "Deleting the leftover draft for $TAG_NAME from an earlier failed run."
+        gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$ID"
+
+    - name: Draft is gone, a new one can be created
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        N=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq --arg t "v$PACKAGE_VERSION" '[.[] | select(.tag_name == $t)] | length')
+        echo "releases for the tag after the step: $N"
+        test "$N" = "0"
+        gh release create "v$PACKAGE_VERSION" --draft --title "v$PACKAGE_VERSION" --notes rebuilt --target "$GITHUB_SHA"
+        gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg t "v$PACKAGE_VERSION" '.[] | select(.tag_name == $t) | "now: draft=\(.draft) notes=\(.body)"'
+
+    # A re-run after a later failure must not fail here because the version is already on npm.
+    - name: Publish to NPM (version 5.1.1)
+      env:
+        PACKAGE_VERSION: '5.1.1'
+        NPM_PUBLISH_TAG: latest
+      run: |
+        if npm view "@newrelic/video-core@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
+          echo "@newrelic/video-core@${PACKAGE_VERSION} is already on npm, skipping publish."
+        else
+          echo "WOULD PUBLISH"
+        fi
+
+    # A re-run after a later failure must not fail here because the version is already on npm.
+    - name: Publish to NPM (version 99.0.0)
+      env:
+        PACKAGE_VERSION: '99.0.0'
+        NPM_PUBLISH_TAG: latest
+      run: |
+        if npm view "@newrelic/video-core@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
+          echo "@newrelic/video-core@${PACKAGE_VERSION} is already on npm, skipping publish."
+        else
+          echo "WOULD PUBLISH"
+        fi
+
+    - name: Clean up
+      if: always()
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release delete "v$PACKAGE_VERSION" --cleanup-tag --yes || true
+        gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r '.[] | select(.draft) | .id' | while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"; done
