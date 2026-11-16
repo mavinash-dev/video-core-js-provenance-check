@@ -1,0 +1,102 @@
+name: Publish Module verify test
+
+on:
+  push:
+    branches: [web-verify-pos, web-verify-neg]
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+
+    - name: Setup git
+      run: |
+        git config user.name "${{ github.actor }}"
+        git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+    - name: Set up Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        # Trusted Publishing requires `npm@11.5.1` or later. Compatible
+        # versions of `npm` started shipping with Node.js v24.5.0.
+        # Hardcoded to ensure NPM Trusted Publishing compatibility.
+        node-version: '24.x'
+        cache: 'npm'
+        # This is important. The OIDC exchange requires that the registry
+        # URL matches on both ends.
+        registry-url: 'https://registry.npmjs.org'
+
+    - name: Install dependencies
+      run: npm ci --ignore-scripts
+
+    - name: Build project
+      run: npm run build
+
+    - name: Get Package Version
+      id: package-version
+      run: |
+        PACKAGE_VERSION=$(jq -r '.version' package.json)
+        echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> $GITHUB_ENV
+        echo "package-version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+        echo "release-tag=v$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+        if echo "$PACKAGE_VERSION" | grep -q "beta"; then
+          echo "NPM_TAG=beta" >> $GITHUB_ENV
+        else
+          echo "NPM_TAG=latest" >> $GITHUB_ENV
+        fi
+
+    - name: Find the built file
+      run: echo "DIST=$(find dist/umd -name '*.min.js' | head -1)" >> "$GITHUB_ENV"
+
+    - name: Generate integrity manifest
+      if: true
+      env:
+        DIST_FILE: ${{ env.DIST }}
+        RELEASE_TAG: v${{ env.PACKAGE_VERSION }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/integrity"
+        node .github/scripts/generate-integrity-manifest.mjs \
+          "$RUNNER_TEMP/integrity/integrity-manifest.json" \
+          "$RUNNER_TEMP/integrity/SHA256SUMS" \
+          "$RELEASE_TAG" "$GITHUB_SHA"
+
+    - name: Attest build provenance
+      if: true
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-checksums: ${{ runner.temp }}/integrity/SHA256SUMS
+
+    - name: Attest manifest and checksums
+      if: true
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: |
+          ${{ runner.temp }}/integrity/SHA256SUMS
+          ${{ runner.temp }}/integrity/integrity-manifest.json
+
+    - name: Tamper with the manifest after attest
+      if: github.ref_name == 'web-verify-neg'
+      run: echo "x" >> "$RUNNER_TEMP/integrity/integrity-manifest.json"
+
+    - name: Verify checksums and attestations
+      if: true
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DIST_FILE: ${{ env.DIST }}
+      run: |
+        # The built file is attested under its S3 names, so it is checked by digest.
+        EXPECTED=$(sha256sum "$DIST_FILE" | cut -d' ' -f1)
+        grep -q "^$EXPECTED  " "$RUNNER_TEMP/integrity/SHA256SUMS"
+        for f in "$DIST_FILE" "$RUNNER_TEMP/integrity/SHA256SUMS" "$RUNNER_TEMP/integrity/integrity-manifest.json"; do
+          gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"
+        done
+
